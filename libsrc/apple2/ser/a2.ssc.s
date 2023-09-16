@@ -26,6 +26,7 @@
         .include        "ser-error.inc"
 
         .macpack        module
+        .macpack        cpu
 
 ; ------------------------------------------------------------------------
 ; Header. Includes jump table
@@ -57,9 +58,13 @@
 ;----------------------------------------------------------------------------
 ; I/O definitions
 
+.if (.cpu .bitand CPU_ISET_65C02)
+ACIA            = $C088
+.else
 Offset          = $8F           ; Move 6502 false read out of I/O to page $BF
-
 ACIA            = $C088-Offset
+.endif
+
 ACIA_DATA       = ACIA+0        ; Data register
 ACIA_STATUS     = ACIA+1        ; Status register
 ACIA_CMD        = ACIA+2        ; Command register
@@ -127,16 +132,41 @@ ParityTable:
         .byte   $60             ; SER_PAR_EVEN
         .byte   $A0             ; SER_PAR_MARK
         .byte   $E0             ; SER_PAR_SPACE
+
+        ; Check five bytes at known positions on the
+        ; slot's firmware to make sure this is an SSC
+        ; (or Apple //c comm port) firmware that drives
+        ; an ACIA 6551 chip.
+        ;
+        ; The SSC firmware and the Apple //c(+) comm
+        ; port firmware all begin with a BIT instruction.
+        ; The IIgs, on the other hand, has a
+        ; Zilog Z8530 chip and its firmware starts with
+        ; a SEP instruction. We don't want to load this
+        ; driver on the IIgs' serial port. We'll
+        ; differentiate the firmware on this byte.
+        ;
+        ; The next four bytes we check are the Pascal
+        ; Firmware Protocol Bytes that identify a
+        ; serial card. Those are the same bytes for
+        ; SSC firmwares, Apple //c firmwares and IIgs
+        ; Zilog Z8530 firmwares - which is the reason
+        ; we have to check for the firmware's first
+        ; instruction too.
+
 IdOfsTable:
+        .byte   $00             ; First instruction
         .byte   $05             ; Pascal 1.0 ID byte
         .byte   $07             ; Pascal 1.0 ID byte
         .byte   $0B             ; Pascal 1.1 generic signature byte
         .byte   $0C             ; Device signature byte
 IdValTable:
-        .byte   $38             ; Fixed
-        .byte   $18             ; Fixed
-        .byte   $01             ; Fixed
-        .byte   $31             ; Serial or parallel I/O card type 1
+        .byte   $2C             ; BIT
+        .byte   $38             ; ID Byte 0 (from Pascal 1.0), fixed
+        .byte   $18             ; ID Byte 1 (from Pascal 1.0), fixed
+        .byte   $01             ; Generic signature for Pascal 1.1, fixed
+        .byte   $31             ; Device signature byte (serial or
+                                ; parallel I/O card type 1)
 
 IdTableLen      = * - IdValTable
 
@@ -168,8 +198,9 @@ SER_CLOSE:
         sta     ACIA_CMD,x
 
         ; Done, return an error code
-:       lda     #<SER_ERR_OK
-        tax                     ; A is zero
+:       lda     #SER_ERR_OK
+        .assert SER_ERR_OK = 0, error
+        tax
         stx     Index           ; Mark port as closed
         rts
 
@@ -199,7 +230,9 @@ SER_OPEN:
         asl
         asl
         asl
+.if .not (.cpu .bitand CPU_ISET_65C02)
         adc     #Offset                 ; Assume carry to be clear
+.endif
         tax
 
         ; Check if the handshake setting is valid
@@ -256,23 +289,24 @@ SER_OPEN:
 
         ; Done
         stx     Index                   ; Mark port as open
-        lda     #<SER_ERR_OK
-        tax                             ; A is zero
+        lda     #SER_ERR_OK
+        .assert SER_ERR_OK = 0, error
+        tax
         rts
 
         ; Device (hardware) not found
-NoDevice:lda    #<SER_ERR_NO_DEVICE
-        ldx     #>SER_ERR_NO_DEVICE
+NoDevice:lda    #SER_ERR_NO_DEVICE
+        ldx     #0 ; return value is char
         rts
 
         ; Invalid parameter
-InvParam:lda    #<SER_ERR_INIT_FAILED
-        ldx     #>SER_ERR_INIT_FAILED
+InvParam:lda    #SER_ERR_INIT_FAILED
+        ldx     #0 ; return value is char
         rts
 
         ; Baud rate not available
-InvBaud:lda     #<SER_ERR_BAUD_UNAVAIL
-        ldx     #>SER_ERR_BAUD_UNAVAIL
+InvBaud:lda     #SER_ERR_BAUD_UNAVAIL
+        ldx     #0 ; return value is char
         rts
 
 ;----------------------------------------------------------------------------
@@ -282,18 +316,13 @@ InvBaud:lda     #<SER_ERR_BAUD_UNAVAIL
 
 SER_GET:
         ldx     Index
-        ldy     SendFreeCnt     ; Send data if necessary
-        iny                     ; Y == $FF?
-        beq     :+
-        lda     #$00            ; TryHard = false
-        jsr     TryToSend
 
         ; Check for buffer empty
-:       lda     RecvFreeCnt     ; (25)
+        lda     RecvFreeCnt     ; (25)
         cmp     #$FF
         bne     :+
-        lda     #<SER_ERR_NO_DATA
-        ldx     #>SER_ERR_NO_DATA
+        lda     #SER_ERR_NO_DATA
+        ldx     #0 ; return value is char
         rts
 
         ; Check for flow stopped & enough free: release flow control
@@ -313,7 +342,11 @@ SER_GET:
         inc     RecvHead
         inc     RecvFreeCnt
         ldx     #$00            ; (59)
+.if (.cpu .bitand CPU_ISET_65C02)
+        sta     (ptr1)
+.else
         sta     (ptr1,x)
+.endif
         txa                     ; Return code = 0
         rts
 
@@ -326,27 +359,29 @@ SER_PUT:
 
         ; Try to send
         ldy     SendFreeCnt
-        iny                     ; Y = $FF?
+        cpy     #$FF            ; Nothing to flush
         beq     :+
         pha
         lda     #$00            ; TryHard = false
         jsr     TryToSend
         pla
 
-        ; Put byte into send buffer & send
-:       ldy     SendFreeCnt
+        ; Reload SendFreeCnt after TryToSend
+        ldy     SendFreeCnt
         bne     :+
-        lda     #<SER_ERR_OVERFLOW
-        ldx     #>SER_ERR_OVERFLOW
+        lda     #SER_ERR_OVERFLOW
+        ldx     #0 ; return value is char
         rts
 
+        ; Put byte into send buffer & send
 :       ldy     SendTail
         sta     SendBuf,y
         inc     SendTail
         dec     SendFreeCnt
         lda     #$FF            ; TryHard = true
         jsr     TryToSend
-        lda     #<SER_ERR_OK
+        lda     #SER_ERR_OK
+        .assert SER_ERR_OK = 0, error
         tax
         rts
 
@@ -359,7 +394,8 @@ SER_STATUS:
         lda     ACIA_STATUS,x
         ldx     #$00
         sta     (ptr1,x)
-        txa                     ; SER_ERR_OK
+        .assert SER_ERR_OK = 0, error
+        txa
         rts
 
 ;----------------------------------------------------------------------------
@@ -379,11 +415,12 @@ SER_IOCTL:
         bcs     :+
 
         stx     Slot
-        tax                     ; SER_ERR_OK
+        .assert SER_ERR_OK = 0, error
+        tax
         rts
 
-:       lda     #<SER_ERR_INV_IOCTL
-        ldx     #>SER_ERR_INV_IOCTL
+:       lda     #SER_ERR_INV_IOCTL
+        ldx     #0 ; return value is char
         rts
 
 ;----------------------------------------------------------------------------
@@ -399,19 +436,19 @@ SER_IRQ:
         and     #$08
         beq     Done            ; Jump if no ACIA interrupt
         lda     ACIA_DATA,x     ; Get byte from ACIA
-        ldy     RecvFreeCnt     ; Check if we have free space left
+        ldx     RecvFreeCnt     ; Check if we have free space left
         beq     Flow            ; Jump if no space in receive buffer
         ldy     RecvTail        ; Load buffer pointer
         sta     RecvBuf,y       ; Store received byte in buffer
         inc     RecvTail        ; Increment buffer pointer
         dec     RecvFreeCnt     ; Decrement free space counter
-        ldy     RecvFreeCnt     ; Check for buffer space low
-        cpy     #33
+        cpx     #33             ; Check for buffer space low
         bcc     Flow            ; Assert flow control if buffer space low
         rts                     ; Interrupt handled (carry already set)
 
         ; Assert flow control if buffer space too low
-Flow:   lda     RtsOff
+Flow:   ldx     Index
+lda     RtsOff
         sta     ACIA_CMD,x
         sta     Stopped
         sec                     ; Interrupt handled
@@ -422,12 +459,13 @@ Done:   rts
 
 TryToSend:
         sta     tmp1            ; Remember tryHard flag
-Again:  lda     SendFreeCnt
+NextByte:
+        lda     SendFreeCnt
         cmp     #$FF
         beq     Quit            ; Bail out
 
         ; Check for flow stopped
-        lda     Stopped
+Again:  lda     Stopped
         bne     Quit            ; Bail out
 
         ; Check that ACIA is ready to send
@@ -444,4 +482,4 @@ Send:   ldy     SendHead
         sta     ACIA_DATA,x
         inc     SendHead
         inc     SendFreeCnt
-        jmp     Again
+        jmp     NextByte
