@@ -12,6 +12,7 @@
 #include <ctype.h>
 
 typedef unsigned char byte;
+typedef          char sbyte;
 
 extern void ClearScreen(void);      // In subs.asm
 extern void ScrollScreen(void);
@@ -51,6 +52,8 @@ byte * screen    = (byte *) 0xA000;
 
 #define SCREEN_WIDTH      320
 #define SCREEN_HEIGHT     200
+#define SCREEN_CENTER_X   (SCREEN_WIDTH/2)
+#define SCREEN_CENTER_Y   (SCREEN_HEIGHT/2)
 #define CHARWIDTH         8
 #define CHARHEIGHT        8
 #define BYTESPERROW       (SCREEN_WIDTH / 8)
@@ -242,49 +245,155 @@ void DrawScreenMoire(int left, int top, int right, int bottom)
 
 }
 
+
+// sin8_C and cos8_C
+//
+// An approximation of sin8 and cos8 that uses a 16-byte lookup table and linear interpolation
+// to provide a fast and close approximation of sin and cos for angles in the 0-255 range
+// The table is a 16-byte table that provides the slope and y-intercept for 8 sections of the
+// 0-255 range, and the code uses the high 4 bits of the angle to select the section and the
+// low 4 bits to interpolate between the two points in that section.
+//
+// Inspired by the lib8tion library in FastLED, but rewritten in cc65 C for the KIM-1
+
+static const byte b_m16_interleave[] = { 0, 49, 49, 41, 90, 27, 117, 10 };
+
+byte sin8_C(byte theta)
+{
+    sbyte y;
+    byte offset, secoffset, section, s2, b, m16, mx;
+    const byte* p;
+
+    offset = theta;
+    if( theta & 0x40 ) {
+        offset = (byte)255 - offset;
+    }
+    offset &= 0x3F; // 0..63
+
+    secoffset  = offset & 0x0F; // 0..15
+    if( theta & 0x40) ++secoffset;
+
+    section = offset >> 4; // 0..3
+    s2 = section * 2;
+    p = b_m16_interleave;
+    p += s2;
+    b =*p;
+    ++p;
+    m16 =  *p;
+
+    mx = (m16 * secoffset) >> 4;
+
+    y = mx + b;
+    if( theta & 0x80 ) y = -y;
+
+    y += 128;
+
+    return y;
+}
+
+byte cos8_C(byte theta)
+{
+    return sin8_C(theta + 64);  
+}
+
+
+void DrawClockOuter()
+{
+    byte z;
+    const int radius = SCREEN_HEIGHT / 2 - 5;
+    
+    ClearScreen();
+    DrawCircleC(SCREEN_WIDTH/2, SCREEN_HEIGHT/2, radius, 1);
+    DrawCircleC(SCREEN_WIDTH/2, SCREEN_HEIGHT/2, radius - 2, 1);
+
+    for (z = 0; z < 12*21; z += 21) 
+    {   // 21 approximates 30 degrees in 0-255 system
+        // Convert the angle from 0-255 range to 0-360 degrees approximation
+        byte angle = z;
+
+        // Calculate the start and end points of the tick marks
+        int x2 = (SCREEN_CENTER_X + ((radius - 5) * (sin8_C(angle) - 128) / 128));
+        int y2 = (SCREEN_CENTER_Y - ((radius - 5) * (cos8_C(angle) - 128) / 128));
+        int x3 = (SCREEN_CENTER_X + ((radius - 2) * (sin8_C(angle) - 128) / 128));
+        int y3 = (SCREEN_CENTER_Y - ((radius - 2) * (cos8_C(angle) - 128) / 128));
+
+        // Draw the tick mark
+        DrawLineC(x2, y2, x3, y3, 1);
+    }
+}
+
+void DrawClockHands(byte hours, byte minutes, byte seconds, byte bDraw)
+{
+    // minutesPerArc = 255 / 60 = 4.25
+    // hoursPerArc = 255 / 12 = 21.25
+
+    // Calculate the angles for the hour, minute, and second hands centered around 128
+    byte hourAngle = ((hours % 12) * 21) + (minutes / 2); // Hour hand angle
+    byte minuteAngle = (minutes * 17) / 4; // 17/4 == 4.25
+    byte secondAngle = (seconds * 17) / 4; // Second hand angle
+
+    int hourX, hourY, minuteX, minuteY, secondX, secondY;
+    const int radius = SCREEN_HEIGHT / 2 - 20;
+
+    // Calculate the position for the hour hand
+    hourX = SCREEN_CENTER_X + ((radius - 40) * (sin8_C(hourAngle) - 128) / 128);
+    hourY = SCREEN_CENTER_Y - ((radius - 40) * (cos8_C(hourAngle) - 128) / 128);
+
+    // Calculate the position for the minute hand
+    minuteX = SCREEN_CENTER_X + ((radius - 10) * (sin8_C(minuteAngle) - 128) / 128);
+    minuteY = SCREEN_CENTER_Y - ((radius - 10) * (cos8_C(minuteAngle) - 128) / 128);
+
+    // Calculate the position for the second hand
+    secondX = SCREEN_CENTER_X + (radius * (sin8_C(secondAngle) - 128) / 128);
+    secondY = SCREEN_CENTER_Y - (radius * (cos8_C(secondAngle) - 128) / 128);
+
+    // Draw the hands
+    DrawLineC(SCREEN_CENTER_X, SCREEN_CENTER_Y, hourX, hourY, bDraw);   // Hour hand
+    DrawLineC(SCREEN_CENTER_X, SCREEN_CENTER_Y, minuteX, minuteY, bDraw); // Minute hand
+    DrawLineC(SCREEN_CENTER_X, SCREEN_CENTER_Y, secondX, secondY, bDraw); // Second hand
+
+    DrawCircleC(SCREEN_WIDTH/2, SCREEN_HEIGHT/2, 3, 1); // Little dot in the middle
+}
+
+void DrawClock(byte hours, byte minutes, byte seconds)
+{
+    static byte lastHour = 0;
+    static byte lastMinute = 0;
+    static byte lastSecond = 0;
+
+    DrawClockHands(lastHour, lastMinute, lastSecond, 0);
+    DrawClockHands(hours, minutes, seconds, 1);
+    
+    lastHour = hours;
+    lastMinute = minutes;
+    lastSecond = seconds;
+
+}
+
 int main (void)
 {
+    byte hour = 5, minute = 6, second = 0;
 
-   int i;
-   int c = 0;
+    DrawClockOuter();
 
-   Demo();
+    while(1)
+    {
+        second++;
+        if (second == 60)
+        {
+            second = 0;
+            minute++;
+            if (minute == 60)
+            {
+                minute = 0;
+                hour++;
+                if (hour == 24)
+                    hour = 0;
+            }
+        }
+        DrawClock(hour, minute, second);
+        Delay(60);
+    }
 
-   CharOut('R');
-   CharOut('E');
-   CharOut('A');
-   CharOut('D');
-   CharOut('Y');
-   CharOut('.');
-   CharOut('\n');
-
-
-   while(1)
-   {
-      c = toupper(getch());
-      if (c != EOF)
-         CharOut(c);
-   }
-
-   // Clear the screen memory
-   while(1)
-   {
-      Demo();
-      DrawScreenMoire(0,30, 319, 199);
-      Delay(10);
-
-      Demo();
-      for (i = 5; i < 80; i+=5)
-      {
-         DrawCircleC(SCREEN_WIDTH/2, SCREEN_HEIGHT/2 + 20, i, 1);
-         DrawCircleC(SCREEN_WIDTH/4, SCREEN_HEIGHT/2 + 20, i, 1);
-         DrawCircleC(SCREEN_WIDTH*3/4, SCREEN_HEIGHT/2 + 20, i, 1);
-      }
-
-      Delay(10);
-
-   }
-
-   printf("Done, exiting...\r\n");
-   return 0;
+    return 0;
 }
