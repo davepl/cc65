@@ -293,7 +293,7 @@ byte sin8_C(byte theta)
 
 byte cos8_C(byte theta)
 {
-    return sin8_C(theta + 64);  
+    return sin8_C(theta + 64);
 }
 
 
@@ -301,12 +301,12 @@ void DrawClockOuter()
 {
     byte z;
     const int radius = SCREEN_HEIGHT / 2 - 5;
-    
+
     ClearScreen();
     DrawCircleC(SCREEN_WIDTH/2, SCREEN_HEIGHT/2, radius, 1);
     DrawCircleC(SCREEN_WIDTH/2, SCREEN_HEIGHT/2, radius - 2, 1);
 
-    for (z = 0; z < 12*21; z += 21) 
+    for (z = 0; z < 12*21; z += 21)
     {   // 21 approximates 30 degrees in 0-255 system
         // Convert the angle from 0-255 range to 0-360 degrees approximation
         byte angle = z;
@@ -363,7 +363,7 @@ void DrawClock(byte hours, byte minutes, byte seconds)
 
     DrawClockHands(lastHour, lastMinute, lastSecond, 0);
     DrawClockHands(hours, minutes, seconds, 1);
-    
+
     lastHour = hours;
     lastMinute = minutes;
     lastSecond = seconds;
